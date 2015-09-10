@@ -1,0 +1,236 @@
+AApackage edu.stanford.cs276;
+
+import java.io.BufferedReader;
+import java.io.File;
+import java.io.FileInputStream;
+import java.io.FileOutputStream;
+import java.io.FileReader;
+import java.io.ObjectInputStream;
+import java.io.ObjectOutputStream;
+import java.io.Serializable;
+import edu.stanford.cs276.util.BigramDictionary;
+import edu.stanford.cs276.util.TrigramDictionary;
+import edu.stanford.cs276.util.UnigramDictionary;
+import edu.stanford.cs276.util.WordDictionary;
+
+
+public class LanguageModel implements Serializable {
+
+	private static final long serialVersionUID = 1L;
+	private static LanguageModel lm_;
+	public static transient double lamda= 0.1;
+	public UnigramDictionary unigramDict;
+	public BigramDictionary bigramDict ;
+	public TrigramDictionary trigramDict ;
+	public WordDictionary wordToId;
+
+	
+	public double getCandProbability(String candidate){
+
+		// P (w1, w2, ..., wn) = P (w1)P (w2|w1)P (w3|w2)...P (wn|wn1)
+		String[] candTerms = candidate.split("\\s+");
+		
+		// Total Tokens
+		double totTokens = (double)unigramDict.termCount();
+		//P(w1) in log
+		String w1 = candTerms[0];
+		double probW1 = Math.log10((double)unigramDict.count(w1, wordToId)/totTokens);
+		
+		//P (w1, w2, ..., wn)
+		double probCandidate = probW1;
+		
+		
+		for( int i =0; i < candTerms.length-1; i++){
+			//Pint(w2|w1) = Pmle(w2) + (1 )Pmle(w2|w1)
+			String currentTerm = candTerms[i];
+			String nextTerm = candTerms[i+1];
+			String bigram = currentTerm + " " + nextTerm;
+			int freqBigram = bigramDict.count(bigram, wordToId);
+			
+			//this term should be in dictionary
+			int freqFirstTerm  = unigramDict.count(currentTerm, wordToId);
+			
+			double PmleW2W1 = (double)freqBigram/(double)freqFirstTerm;
+			
+			//System.out.println("candidate=[" + candidate + "]\tbigram=[" +  bigram + "]\tterms=" + Arrays.toString(terms));
+			double PmleW2 = (double)unigramDict.count(nextTerm, wordToId) / totTokens;
+			//double lamda= 0.1;
+			double PintW2W1 = lamda*PmleW2 + (1-lamda)*PmleW2W1;
+			probCandidate = probCandidate + Math.log10(PintW2W1);
+		}
+		return probCandidate;
+	}
+	
+	public double getSmoothedProbability(String candidate) {
+			String[] candTerms = candidate.split("\\s+");
+
+			// Total Tokens
+			double totTokensInUnigram = (double) unigramDict.termCount();
+
+			// P(w1) in log
+			String w1 = candTerms[0];
+			double probW1 = Math.log10((double) unigramDict.count(w1, wordToId)
+					/ totTokensInUnigram);
+
+			// P (w1, w2, ..., wn)
+			double probCandidate = probW1;
+				//P (w1, w2, ..., wn) = P (w1)*P(w2|w1)*P(w3|w1w2)*P(w4|w2w3)...P (wn|wn-2.wn1)
+				if(candTerms.length>1){
+					String w2= candTerms[1];
+					String bigramW1W2 = w1+" "+w2;
+					int countbigramW1W2 = bigramDict.count(bigramW1W2, wordToId);
+					double Pw2w1;
+					if(countbigramW1W2>0){
+						Pw2w1 = (double)countbigramW1W2/(double) unigramDict.count(w1, wordToId);
+					}else{
+						Pw2w1 = (double)unigramDict.count(w2, wordToId)/ totTokensInUnigram;
+					}
+					probCandidate = probCandidate + Math.log10(Pw2w1);
+				}
+				
+				for (int i = 0; i < candTerms.length - 2; i++) {
+				
+					String firstTerm = candTerms[i];
+					String secondTerm = candTerms[i+1];
+					String thirdTerm = candTerms[i+2];
+					
+					String t23 = secondTerm + " " + thirdTerm;
+							
+					double Pw3w1w2;
+					int countTrigram = trigramDict.count(firstTerm, t23 , wordToId);
+					if(countTrigram>0){
+						String bigram12 = firstTerm + " " + secondTerm;
+						Pw3w1w2 = (double)countTrigram/(double)bigramDict.count(bigram12, wordToId);
+					}else{
+						String bigram23 = secondTerm + " " + thirdTerm;
+						int countbigram23 = bigramDict.count(bigram23, wordToId);
+						if(countbigram23>0){
+							Pw3w1w2 = (double)countbigram23/(double) unigramDict.count(secondTerm, wordToId);
+						}else{
+							Pw3w1w2 = (double)unigramDict.count(thirdTerm, wordToId)/ totTokensInUnigram;
+						}
+					}
+					probCandidate = probCandidate + Math.log10(Pw3w1w2);
+				}
+			return probCandidate;
+	}
+	
+	private LanguageModel(){}
+	
+	// Do not call constructor directly since this is a Singleton
+	private LanguageModel(String corpusFilePath, boolean considerExtra) throws Exception {
+		constructDictionaries(corpusFilePath, considerExtra);
+	}
+	
+	public static LanguageModel getLanguageModel(){
+		return lm_;
+	}
+
+    public boolean dictContains(String word) {
+	return unigramDict.count(word, wordToId) != 0;
+    }
+
+	public void constructDictionaries(String corpusFilePath, boolean considerExtra)
+			throws Exception {
+
+		System.out.println("Constructing dictionaries...");
+		
+		wordToId = new WordDictionary();
+		File dir = new File(corpusFilePath);
+		for (File file : dir.listFiles()) {
+			if (".".equals(file.getName()) || "..".equals(file.getName()) || ".DS_Store".equals(file.getName())) {
+				continue; // Ignore the self and parent aliases.
+			}
+//			System.out.printf("Reading data file %s for Pass1...\n", file.getName());
+			BufferedReader input = new BufferedReader(new FileReader(file));
+			String line = null;
+			while ((line = input.readLine()) != null) {
+				String[] subStr = line.split("\\s+");
+				for (int i = 0; i < subStr.length; i++) {
+					if (!wordToId.getMap().containsKey(subStr[i])){
+						wordToId.getMap().put(subStr[i], wordToId.getMap().size());
+					}
+				}
+			}
+			input.close();
+		}
+		
+		bigramDict = new BigramDictionary();
+		unigramDict = new UnigramDictionary(wordToId.getMap().size());
+		if(considerExtra){
+				trigramDict = new TrigramDictionary();
+		}
+		) {
+	    String[] subStr = line.split("\\s+");
+	    for (int i = 0; i < subStr.length; i++) {
+		if (!wordToId.getMap().containsKey(subStr[i])){
+		    wordToId.getMap().put(subStr[i], wordToId.getMap().size());
+		}
+	    }
+
+		for (File file : dir.listFiles()) {
+			if (".".equals(file.getName()) || "..".equals(file.getName()) || ".DS_Store".equals(file.getName())) {
+				continue; // Ignore the self and parent aliases.
+			}
+			System.out.printf("Reading data file %s for Pass2...\n", file.getName());
+			BufferedReader input = new BufferedReader(new FileReader(file));
+			String line = null;
+			while ((line = input.readLine()) != null) {
+				String[] subStr = line.split("\\s+");
+				for (int i = 0; i < subStr.length; i++) {
+					int idi = wordToId.getMap().get(subStr[i]);
+					unigramDict.add(idi);
+					if (i < subStr.length - 1) {
+						int idip1 = wordToId.getMap().get(subStr[i + 1]);
+						long key = (long) idi
+								+ ((long) wordToId.getMap().size())
+								* ((long) idip1);
+						bigramDict.add(key);
+					}
+					if (considerExtra) {
+						if (i < subStr.length - 2) {
+							int idip1 = wordToId.getMap().get(subStr[i + 1]);
+							int idip2 = wordToId.getMap().get(subStr[i + 2]);
+							long key23 = (long) idip1
+									+ ((long) wordToId.getMap().size())
+									* ((long) idip2);
+							trigramDict.add(idi, key23);
+						}
+					}
+				}
+			}
+			input.close();
+		}
+		System.out.println("Done.");
+	}
+	
+	// Loads the object (and all associated data) from disk
+	public static LanguageModel load() throws Exception {
+		try {
+			if (lm_==null){
+				FileInputStream fiA = new FileInputStream(Config.languageModelFile);
+				ObjectInputStream oisA = new ObjectInputStream(fiA);
+				lm_ = (LanguageModel) oisA.readObject();
+			}
+		} catch (Exception e){
+			throw new Exception("Unable to load language model.  You may have not run build corrector");
+		}
+		return lm_;
+	}
+	
+	// Saves the object (and all associated data) to disk
+	public void save() throws Exception{
+		FileOutputStream saveFile = new FileOutputStream(Config.languageModelFile);
+		ObjectOutputStream save = new ObjectOutputStream(saveFile);
+		save.writeObject(lm_);
+		save.close();
+	}
+	
+	// Creates a new lm object from a corpus
+	public static LanguageModel create(String corpusFilePath, boolean considerExtra) throws Exception {
+		if(lm_ == null ){
+			lm_ = new LanguageModel(corpusFilePath, considerExtra);
+		}
+		return lm_;
+	}
+}
